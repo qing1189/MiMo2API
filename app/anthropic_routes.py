@@ -12,6 +12,8 @@ import json
 import uuid
 import time
 import re
+import httpx
+import base64 as b64
 from typing import Optional, AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Header, Request
@@ -40,7 +42,7 @@ from .batch import init_batch_storage as _anthropic_init_batch_storage
 from .mimo_client import MimoClient, MimoApiError
 from .config import config_manager
 from .models import OpenAIMessage
-from .utils import build_query_from_messages
+from .utils import build_query_from_messages, extract_medias_from_messages, upload_media_to_mimo, upload_text_file_to_mimo
 from .tool_call import extract_tool_call, get_tool_names, clean_tool_text
 from .session_store import (
     get_or_create_session as _get_or_create_session,
@@ -379,6 +381,56 @@ async def anthropic_messages(
     tools_dict = openai_tools
     query = build_query_from_messages(msgs_as_objects, tools=tools_dict)
 
+    # ── 提取并上传图片/文件 ──
+    query_text, base64_medias, text_files, processed_msgs = extract_medias_from_messages(msgs_as_objects)
+
+    # 扫描 HTTP URL 图片（Anthropic source.type="url" → image_url with HTTP URL）
+    http_images = []
+    for m in openai_messages:
+        if isinstance(m, dict) and m.get("role") == "user":
+            content = m.get("content", "")
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "image_url":
+                        img_url = item.get("image_url", {})
+                        url = img_url.get("url", "") if isinstance(img_url, dict) else str(img_url)
+                        if url and (url.startswith("http://") or url.startswith("https://")):
+                            http_images.append(url)
+
+    if http_images:
+        async with httpx.AsyncClient(timeout=30) as http_client:
+            for url in http_images:
+                try:
+                    resp = await http_client.get(url)
+                    if resp.status_code == 200:
+                        img_b64 = b64.b64encode(resp.content).decode()
+                        content_type = resp.headers.get("content-type", "image/jpeg")
+                        base64_medias.append({
+                            "base64": img_b64,
+                            "mimeType": content_type,
+                            "type": "image"
+                        })
+                except Exception as e:
+                    print(f"[Anthropic] failed to download image URL {url}: {e}")
+
+    # 上传到 MiMo CDN
+    multi_medias = []
+    if base64_medias:
+        for media in base64_medias:
+            media_obj = await upload_media_to_mimo(
+                media["base64"], media["mimeType"], account, model
+            )
+            if media_obj:
+                multi_medias.append(media_obj)
+
+    if text_files:
+        for tf in text_files:
+            media_obj = await upload_text_file_to_mimo(
+                tf["base64"], tf["filename"], tf["mimeType"], account, model
+            )
+            if media_obj:
+                multi_medias.append(media_obj)
+
     # ── 会话管理 ──
     conv_id, conv_is_new = _get_or_create_session(
         account.user_id, msgs_as_objects, model,
@@ -394,7 +446,7 @@ async def anthropic_messages(
     # ═══════════════════════════════════════════════════════════
     if stream:
         async def _wrap():
-            mimo_gen = client.stream_api(query, False, model, conversation_id=conv_id)
+            mimo_gen = client.stream_api(query, False, model, multi_medias=multi_medias, conversation_id=conv_id)
             async for event in _anthropic_stream_think_wrapper(
                 mimo_gen, model, msg_id, tool_names=tool_names,
             ):
@@ -414,7 +466,7 @@ async def anthropic_messages(
     # ═══════════════════════════════════════════════════════════
     try:
         content, think_content, usage = await client.call_api(
-            query, False, model, conversation_id=conv_id,
+            query, False, model, multi_medias=multi_medias, conversation_id=conv_id,
         )
 
         # 保存用量
