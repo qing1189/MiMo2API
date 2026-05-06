@@ -31,7 +31,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_discover_models():
     import os as _anthropic_os
-    from app.anthropic_adapter import init_batch_storage as _mimo_init_batch_storage
+    from app.batch import init_batch_storage as _mimo_init_batch_storage
     _mimo_init_batch_storage(_anthropic_os.path.join(_anthropic_os.path.dirname(_anthropic_os.path.abspath(__file__)), ".anthropic_batches"))
     """服务启动时预探测模型，避免首次请求返回3个硬编码模型"""
     try:
