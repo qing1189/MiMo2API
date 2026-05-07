@@ -7,29 +7,35 @@
       "requests": 9
     },
     "mimo-v2.5-pro": {
-      "prompt_tokens": 12910,
-      "completion_tokens": 144,
-      "total_tokens": 13054,
-      "requests": 4
+      "prompt_tokens": 23140,
+      "completion_tokens": 254,
+      "total_tokens": 23394,
+      "requests": 6
     },
     "mimo-v2-flash": {
-      "prompt_tokens": 19040,
-      "completion_tokens": 38384,
-      "total_tokens": 57424,
-      "requests": 41
+      "prompt_tokens": 19202,
+      "completion_tokens": 39099,
+      "total_tokens": 58301,
+      "requests": 42
     },
     "mimo-v2-pro": {
       "prompt_tokens": 3112,
       "completion_tokens": 164,
       "total_tokens": 3276,
       "requests": 1
+    },
+    "mimo-2.5-pro": {
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "requests": 1
     }
   },
   "total": {
-    "prompt_tokens": 65755,
-    "completion_tokens": 39397,
-    "total_tokens": 105152,
-    "requests": 55
+    "prompt_tokens": 76147,
+    "completion_tokens": 40222,
+    "total_tokens": 116369,
+    "requests": 59
   },
   "daily": {
     "2026-05-03": {
@@ -68,10 +74,10 @@
     },
     "2026-05-06": {
       "mimo-v2-flash": {
-        "prompt_tokens": 1714,
-        "completion_tokens": 13809,
-        "total_tokens": 15523,
-        "requests": 9
+        "prompt_tokens": 1876,
+        "completion_tokens": 14524,
+        "total_tokens": 16400,
+        "requests": 10
       },
       "mimo-v2.5-pro": {
         "prompt_tokens": 9806,
@@ -84,6 +90,20 @@
         "completion_tokens": 164,
         "total_tokens": 3276,
         "requests": 1
+      }
+    },
+    "2026-05-07": {
+      "mimo-2.5-pro": {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "requests": 1
+      },
+      "mimo-v2.5-pro": {
+        "prompt_tokens": 10230,
+        "completion_tokens": 110,
+        "total_tokens": 10340,
+        "requests": 2
       }
     }
   }

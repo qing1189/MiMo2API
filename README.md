@@ -408,6 +408,21 @@ curl -N -X POST http://localhost:8080/v1/messages \
 | `/v1/messages/batches/{batch_id}/results` | GET | 下载结果 JSONL |
 | `/v1/messages/batches/{batch_id}` | DELETE | 删除批量任务 |
 
+### Anthropic 模型名映射
+
+Claude Code CLI 等工具期望 Anthropic 风格的模型名，无法直接使用 `mimo-*` 原生名。本代理在 Anthropic 端点内部自动映射：
+
+| Claude 模型名 | → MiMo 内部模型 |
+|---|---|
+| `claude-opus-4-6` | `mimo-v2-pro` |
+| `claude-sonnet-4-6` | `mimo-v2-flash` |
+| `claude-haiku-4-5` | `mimo-v2-flash` |
+| `claude-3-7-sonnet` | `mimo-v2-flash` |
+| `claude-3-5-sonnet` | `mimo-v2-flash` |
+| `claude-3-opus` | `mimo-v2-pro` |
+
+也支持 search/nothinking 变体和 Claude 4.x 历史名。MiMo 原生名（`mimo-*`）继续直接使用，`/v1/models` 返回不变，不影响其他软件。
+
 ### 认证
 
 Anthropic 客户端使用 `x-api-key` 头（RikkaHub 自动切换），也兼容 `Authorization: Bearer`：
