@@ -661,14 +661,22 @@ async def _stream_response(
                         if idx != -1:
                             safe, keep = _safe_flush(buffer[:idx])
                             if safe:
-                                yield _build_chunk(msg_id, model, created=created_t, content=safe)
+                                clean = _strip_tool_result_blocks(safe)
+                                clean = _strip_citations(clean)
+                                clean = _strip_mimo_prefix(clean)
+                                if clean:
+                                    yield _build_chunk(msg_id, model, created=created_t, content=clean)
                             in_think = True
                             buffer = buffer[idx + len(THINK_OPEN):]
                             continue
 
                         safe, keep = _safe_flush(buffer)
                         if safe:
-                            yield _build_chunk(msg_id, model, created=created_t, content=safe)
+                            clean = _strip_tool_result_blocks(safe)
+                            clean = _strip_citations(clean)
+                            clean = _strip_mimo_prefix(clean)
+                            if clean:
+                                yield _build_chunk(msg_id, model, created=created_t, content=clean)
                         buffer = keep
                         break
                     else:

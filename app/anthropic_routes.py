@@ -238,11 +238,18 @@ async def _anthropic_stream_think_wrapper(
         if has_tools and sieve:
             for ev in sieve.feed(buf_text):
                 if ev.type == 'text':
-                    events.extend(_emit_text(ev.data))
+                    clean = _strip_tool_result_blocks(ev.data)
+                    clean = _strip_citations(clean)
+                    clean = _strip_tool_name_prefix(clean, tool_names)
+                    clean = _strip_mimo_prefix(clean)
+                    events.extend(_emit_text(clean))
                 elif ev.type == 'tool_calls':
                     collected_tool_calls.extend(ev.data)
         else:
-            events.extend(_emit_text(buf_text))
+            clean = _strip_tool_result_blocks(buf_text)
+            clean = _strip_citations(clean)
+            clean = _strip_mimo_prefix(clean)
+            events.extend(_emit_text(clean))
         return events
 
     async for ev in mimo_stream:
@@ -334,7 +341,11 @@ async def _anthropic_stream_think_wrapper(
     if has_tools and sieve:
         for ev in sieve.flush():
             if ev.type == 'text':
-                for s in _emit_text(ev.data):
+                clean = _strip_tool_result_blocks(ev.data)
+                clean = _strip_citations(clean)
+                clean = _strip_tool_name_prefix(clean, tool_names)
+                clean = _strip_mimo_prefix(clean)
+                for s in _emit_text(clean):
                     yield s
             elif ev.type == 'tool_calls':
                 collected_tool_calls.extend(ev.data)
