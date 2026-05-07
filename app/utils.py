@@ -374,19 +374,28 @@ def build_query_from_messages(
 ) -> str:
     """从消息列表构建查询字符串。
 
-    格式：用户消息在前（明确任务），工具信息在末尾（简短参考）。
+    格式：系统消息（含工具提示词）→ 对话历史。
     MiMo API 没有 system/user 角色分离，query 是纯文本拼接。
-    系统消息不传给 MiMo（它是 Hermes 自己用的）。
+    工具提示词嵌入 system 消息一次，不再每轮重复注入。
+    无 system 消息但有 tools 时自动补 system。
     """
     from .tool_call import build_tool_prompt
 
     query_parts = []
+    system_text = ""
 
     for msg in messages:
         role = msg.role
         content = msg.content or ""
 
         if role == "system":
+            if isinstance(content, list):
+                text_parts = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        text_parts.append(item.get("text", ""))
+                content = " ".join(text_parts)
+            system_text = str(content).strip()
             continue
 
         if isinstance(content, list):
@@ -407,32 +416,17 @@ def build_query_from_messages(
 
         query_parts.append(f"{role}: {content}")
 
-    result = "\n".join(query_parts)
-
-    # 注入工具提示
+    # 工具提示词嵌入 system 消息（一次，不再每轮重复追加末尾）
     if tools:
-        has_tool_result = any(
-            (hasattr(m, 'role') and m.role == "tool") or
-            (isinstance(m, dict) and m.get('role') == "tool")
-            for m in messages
-        )
-        if has_tool_result:
-            # 后续轮：列工具名+简介，不注任何指令，避免循环
-            parts = []
-            for t in tools:
-                fn = t.get("function", {}) if isinstance(t, dict) else getattr(t, "function", {})
-                name = (fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", "")) or (t.get("name") if isinstance(t, dict) else getattr(t, "name", ""))
-                if not name:
-                    continue
-                desc = (fn.get("description") if isinstance(fn, dict) else getattr(fn, "description", "")) or (t.get("description") if isinstance(t, dict) else getattr(t, "description", ""))
-                short = desc.strip() if desc else ""
-                parts.append(f"{name}({short})" if short else name)
-            if parts:
-                result += f"\n可用工具: {', '.join(parts)}"
-        else:
-            # 首轮：完整格式指令（含规则和错误示例）
-            tool_prompt = build_tool_prompt(tools)
-            if tool_prompt:
-                result += f"\n{tool_prompt}"
+        tool_prompt = build_tool_prompt(tools)
+        if tool_prompt:
+            if system_text:
+                system_text = system_text + "\n\n" + tool_prompt
+            else:
+                system_text = tool_prompt
 
-    return result
+    # system 消息插入最前面
+    if system_text:
+        query_parts.insert(0, f"system: {system_text}")
+
+    return "\n".join(query_parts)
