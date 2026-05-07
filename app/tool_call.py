@@ -4,7 +4,7 @@
 将 OpenAI function calling 格式转译为 MiMo 可理解的 MiMoML 提示词，
 并从 MiMo 的纯文本响应中解析回结构化 tool_call。
 
-7 重提取策略 + camelCase 全链路匹配 + 防御性编程。
+5 重提取策略 + camelCase 全链路匹配 + 防御性编程。
 """
 
 from __future__ import annotations
@@ -156,14 +156,12 @@ def extract_tool_call(
 ) -> Tuple[Optional[List[Dict[str, Any]]], str]:
     """从 MiMo 输出文本中提取工具调用。
 
-    7 重策略（按优先级）：
+    5 重策略（按优先级）：
       0. <|MiMoML|tool_calls> XML — MiMoML 格式（最高优先级）
-      1. TOOL_CALL: name(args)  — 标准格式
+      1. TOOL_CALL: name(args)  — 旧格式兜底
       2. JSON {"name":"x","arguments":{...}} — 内嵌 JSON
       3. <tool_call> XML — MiMo 原生格式
       4. <function_call> JSON+XML
-      5. [调用工具: NAME] — 中文格式
-      6. name(args) 自由文本 — 低优先级
 
     Returns:
         (tool_calls_list_or_None, cleaned_text)
@@ -198,16 +196,6 @@ def extract_tool_call(
     if tc:
         return tc, clean_tool_text(text)
 
-    # 策略5: [调用工具: NAME] 中文格式
-    tc = _extract_chinese_tool_call(text, tool_names)
-    if tc:
-        return tc, clean_tool_text(text)
-
-    # 策略6: 自由文本 name(args)（低优先级）
-    tc = _extract_freeform_tool_call(text, tool_names)
-    if tc:
-        return tc, clean_tool_text(text)
-
     return None, text
 
 
@@ -223,8 +211,21 @@ def _extract_mimoml_tool_call(
       </|MiMoML|invoke>
     </|MiMoML|tool_calls>
     """
-    if "<|MiMoML|tool_calls>" not in text:
+    if _MIMOML_KEYWORD not in text.lower():
         return None
+
+    # 松散 CDATA 修复：处理未闭合的 CDATA
+    text = _sanitize_loose_cdata(text)
+
+    # 缺失开标签修复：有关闭标签但缺开头 → 补回 <|MiMoML|tool_calls>
+    has_closing = ("</|MiMoML|tool_calls>" in text or
+                   "</mimoml-tool_calls>" in text.lower() or
+                   "</tool_calls>" in text.lower())
+    has_opening = ("<|MiMoML|tool_calls" in text.replace(' ', '').replace('｜','|').replace('||','|') or
+                   "<mimoml-tool_calls" in text.lower() or
+                   "<tool_calls>" in text.lower())
+    if has_closing and not has_opening:
+        text = "<|MiMoML|tool_calls>\n" + text
 
     normalized = strip_mimoml(text)
     tool_calls = []
@@ -379,40 +380,6 @@ def _extract_json_tool_call(
         start = text.find("}", brace + len(js)) + 1
 
 
-# ─── 策略3: name(args) 自由文本 ─────────────────────────────
-
-def _extract_freeform_tool_call(
-    text: str, tool_names: List[str]
-) -> Optional[List[Dict[str, Any]]]:
-    """匹配 name(args) 模式（无 TOOL_CALL 前缀）。
-
-    支持 snake_case 和 camelCase 变体，大小写不敏感。
-    """
-    for name in tool_names:
-        # 构建工具名变体
-        variants = [re.escape(name)]
-        if '_' in name:
-            # 生成 camelCase 变体
-            camel = re.sub(r'_([a-z])', lambda m: m.group(1).upper(), name)
-            variants.append(re.escape(camel))
-
-        escaped = '|'.join(variants)
-        # word boundary 前缀避免句子中间误匹配
-        pat = rf"(?<!\w)({escaped})\s*\((.*?)\)"
-        for m in re.finditer(pat, text, re.DOTALL | re.IGNORECASE):
-            if _is_inside_think(text, m.start()):
-                continue
-            resolved = _resolve_tool_name(m.group(1).strip(), tool_names)
-            if resolved:
-                args_raw = m.group(2).strip()
-                args = _parse_function_args(args_raw)
-                tc = normalize_tool_call({"name": resolved, "arguments": args})
-                if tc:
-                    return [tc]
-
-    return None
-
-
 # ─── 策略4: <tool_call> XML（MiMo 原生） ───────────────────
 
 def _extract_xml_tool_call(
@@ -497,51 +464,6 @@ def _extract_function_call_json(
                 pass
 
     return None
-
-
-# ─── 策略6: [调用工具: NAME] 中文格式 ───────────────────────
-
-def _extract_chinese_tool_call(
-    text: str, tool_names: List[str]
-) -> Optional[List[Dict[str, Any]]]:
-    """匹配 [调用工具: NAME] 中文格式（模型从历史中学到的格式）。"""
-    pat = r"\[\u8c03\u7528\u5de5\u5177:\s*(\w+(?:,\s*\w+)*)\]"
-    m = re.search(pat, text)
-    if not m:
-        return None
-
-    if _is_inside_think(text, m.start()):
-        return None
-
-    names = [n.strip() for n in m.group(1).split(",")]
-    found_name = None
-    for n in names:
-        resolved = _resolve_tool_name(n, tool_names)
-        if resolved:
-            found_name = resolved
-            break
-
-    if not found_name:
-        return None
-
-    after = text[m.end():].strip()
-    args = {}
-
-    if after:
-        if after.startswith("{"):
-            js = _find_balanced_json(after, 0)
-            if js:
-                try:
-                    args = json.loads(js)
-                except json.JSONDecodeError:
-                    pass
-        else:
-            first_line = after.split("\n")[0].strip()
-            if first_line and not first_line.startswith("["):
-                args = {"input": first_line}
-
-    tc = normalize_tool_call({"name": found_name, "arguments": args})
-    return [tc] if tc else None
 
 
 # ─── 标准化工具调用为 OpenAI 格式 ──────────────────────────
@@ -645,11 +567,6 @@ def clean_tool_text(text: str) -> str:
     text = re.sub(r"</?function=\w+>", "", text, flags=re.IGNORECASE)
     text = re.sub(r"<parameter=\w+>", "", text)
     text = re.sub(r"</parameter>", "", text)
-    # [调用工具: xxx] 中文格式
-    text = re.sub(
-        r"\[\s*\u8c03\u7528\u5de5\u5177\s*:\s*\w+(?:\s*,\s*\w+)*\s*\].*",
-        "", text, flags=re.MULTILINE
-    )
     # JSON tool_call 块
     text = re.sub(
         r"```(?:json)?\s*\n?\s*\{.*?\"tool_call\".*?\}\s*\n?\s*```",
@@ -821,8 +738,18 @@ def _is_inside_think(text: str, pos: int) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════
-# MiMoML 工具调用（策略7）
-# ═══════════════════════════════════════════════════════════
+# MiMoML 噪声容错前缀：重复 <、|、｜、空格、mimoml 关键字
+_MIMOML_NOISE_CHARS = set("|｜ \t\r\n")
+_MIMOML_KEYWORD = "mimoml"
+_MIMOML_KEYWORD_LEN = len(_MIMOML_KEYWORD)
+
+# 连字符变体：mimoml-tool_calls → tool_calls
+_MIMOML_HYPHENATED = {
+    "mimoml-tool_calls": "tool_calls",
+    "mimoml-tool-calls": "tool_calls",
+    "mimoml-invoke": "invoke",
+    "mimoml-parameter": "parameter",
+}
 
 _MIMOML_TAG_NAMES = {"tool_calls", "invoke", "parameter"}
 _CDATA_OPEN = "<![CDATA["
@@ -830,12 +757,19 @@ _CDATA_CLOSE = "]]>"
 
 
 def strip_mimoml(text: str) -> str:
-    """去除 MiMoML 前缀标记，转换为标准 XML。
+    """去除 MiMoML 前缀标记，转换为标准 XML，支持噪声容错。
 
-    <|MiMoML|tool_calls>  →  <tool_calls>
-    <|MiMoML|invoke name="x">  →  <invoke name="x">
-    <|MiMoML|parameter name="x">  →  <parameter name="x">
-    </|MiMoML|invoke>  →  </invoke>
+    处理的变体：
+      <|MiMoML|tool_calls>      →  <tool_calls>
+      <MiMoML|tool_calls>       →  <tool_calls>     (缺开头 |)
+      <<|MiMoML|tool_calls>     →  <tool_calls>     (重复 <)
+      <|MiMoML tool_calls>      →  <tool_calls>     (空格)
+      <｜MiMoML｜tool_calls>     →  <tool_calls>     (全宽管道)
+      <MiMoMLtool_calls>        →  <tool_calls>     (无分隔符)
+      <|MiMoML|tool_calls|>     →  <tool_calls>     (尾部 |)
+      <mimoml-tool_calls>       →  <tool_calls>     (连字符)
+
+    自动跳过 markdown 围栏代码块内的 MiMoML 示例。
     """
     if not text:
         return text
@@ -843,10 +777,9 @@ def strip_mimoml(text: str) -> str:
     result_parts = []
     i = 0
     n = len(text)
+    text_lower = text.lower()
 
     while i < n:
-        c = text[i]
-
         # CDATA 块 → 原样保留
         if text[i:].startswith(_CDATA_OPEN):
             close = text.find(_CDATA_CLOSE, i + len(_CDATA_OPEN))
@@ -857,11 +790,19 @@ def strip_mimoml(text: str) -> str:
             i = close + len(_CDATA_CLOSE)
             continue
 
+        # 围栏代码块 → 跳过
+        i, skipped = _skip_fenced_block(text, i)
+        if skipped:
+            result_parts.append(skipped)
+            continue
+
+        c = text[i]
         if c != '<':
             result_parts.append(c)
             i += 1
             continue
 
+        # 找到 > 结束
         end = text.find('>', i)
         if end == -1:
             result_parts.append(text[i:])
@@ -871,34 +812,24 @@ def strip_mimoml(text: str) -> str:
         closing = inner.startswith('/')
         rest = inner[1:] if closing else inner
 
-        j = 0
-        is_mimoml = False
-        while j < len(rest):
-            ch = rest[j]
-            if ch == '|':
-                j += 1
-                is_mimoml = True
-            elif ch in (' ', '\t', '\r', '\n'):
-                j += 1
-                is_mimoml = True
-            elif rest[j:j+6].lower() == 'mimoml':
-                j += 6
-                is_mimoml = True
-            else:
-                break
+        j, is_mimoml = _consume_mimoml_noise(rest, text_lower, i + 1 + (1 if closing else 0))
 
         if is_mimoml:
-            name_end = j
-            while name_end < len(rest) and (rest[name_end].isalnum() or rest[name_end] == '_'):
-                name_end += 1
-            tag_name = rest[j:name_end].lower()
+            tag_name = _match_mimoml_tag(rest, j)
+            if tag_name:
+                rest_after = rest[tag_name[1]:]
+                actual_end = end
+                if rest_after.startswith('|') or rest_after.startswith('｜'):
+                    rest = rest[:tag_name[1]] + rest_after[1:] if len(rest_after) == 1 else rest[:tag_name[1]] + rest_after[3:] if rest_after.startswith('｜') else rest[:tag_name[1]] + rest_after[1:]
+                    new_end = text.find('>', i)
+                    if new_end != -1 and new_end < end:
+                        actual_end = new_end
 
-            if tag_name in _MIMOML_TAG_NAMES:
                 prefix = '</' if closing else '<'
                 result_parts.append(prefix)
                 result_parts.append(rest[j:])
                 result_parts.append('>')
-                i = end + 1
+                i = actual_end + 1
                 continue
 
         result_parts.append(text[i : end + 1])
@@ -907,8 +838,135 @@ def strip_mimoml(text: str) -> str:
     return ''.join(result_parts)
 
 
+def _skip_fenced_block(text: str, i: int) -> Tuple[int, Optional[str]]:
+    """检查当前位置是否在围栏代码块开始处。
+
+    支持 ``` 和 ~~~ 围栏，包括嵌套围栏。
+    如果是，跳过整个代码块，返回 (新位置, 跳过的文本)。
+    """
+    n = len(text)
+    # 反引号围栏 ```
+    fence_len = _count_fence(text, i, '`')
+    if fence_len >= 3:
+        # 找到匹配的结束围栏
+        end_pos = _find_fence_close(text, i + fence_len, '`', fence_len)
+        if end_pos >= 0:
+            return end_pos, text[i:end_pos]
+
+    # 波浪线围栏 ~~~
+    fence_len = _count_fence(text, i, '~')
+    if fence_len >= 3:
+        end_pos = _find_fence_close(text, i + fence_len, '~', fence_len)
+        if end_pos >= 0:
+            return end_pos, text[i:end_pos]
+
+    return i, None
+
+
+def _count_fence(text: str, start: int, char: str) -> int:
+    """计算从 start 开始连续 char 的数量。"""
+    count = 0
+    while start + count < len(text) and text[start + count] == char:
+        count += 1
+    return count
+
+
+def _find_fence_close(text: str, start: int, char: str, min_len: int) -> int:
+    """找到匹配的围栏结束位置（包括换行符之前），返回结束位置或 -1。"""
+    i = start
+    # 跳过 fence 开始后的行内内容（语言标识等）
+    nl = text.find('\n', i)
+    if nl >= 0:
+        i = nl + 1
+    else:
+        return -1
+
+    while i < len(text):
+        nl = text.find('\n', i)
+        if nl < 0:
+            return -1
+        line_start = nl + 1
+        fence_len = _count_fence(text, line_start, char)
+        if fence_len >= min_len:
+            # 确保后面是换行或结束
+            after = line_start + fence_len
+            if after >= len(text) or text[after] == '\n' or text[after] == '\r':
+                return line_start + fence_len + (1 if after < len(text) and text[after] == '\n' else 0)
+        i = line_start + 1
+
+    return -1
+
+
+def _consume_mimoml_noise(rest: str, text_lower: str, abs_pos: int) -> tuple:
+    """消费 MiMoML 噪声前缀，返回 (j, is_mimoml)。"""
+    j = 0
+    is_mimoml = False
+    rest_len = len(rest)
+
+    while j < rest_len:
+        ch = rest[j]
+        # 重复 < → 噪声
+        if ch == '<':
+            j += 1
+            is_mimoml = True
+            continue
+        # 单字符噪声（|、空格等）
+        if ch in _MIMOML_NOISE_CHARS:
+            j += 1
+            is_mimoml = True
+            continue
+        # 全宽管道 ｜(U+FF5C)
+        if rest[j:].startswith('｜'):
+            j += 1
+            is_mimoml = True
+            continue
+        # mimoml 关键字
+        if rest[j:j+_MIMOML_KEYWORD_LEN].lower() == _MIMOML_KEYWORD:
+            j += _MIMOML_KEYWORD_LEN
+            is_mimoml = True
+            # 如果后面紧跟 - 或 _（连字符变体），也吞掉
+            if j < rest_len and rest[j] in ('-', '_'):
+                j += 1
+            continue
+        break
+
+    return j, is_mimoml
+
+
+def _match_mimoml_tag(rest: str, j: int) -> Optional[tuple]:
+    """匹配 MiMoML 标签名，返回 (canonical_name, end_pos) 或 None。"""
+    rest_len = len(rest)
+    # 先检查连字符变体
+    for hyphenated, canonical in _MIMOML_HYPHENATED.items():
+        if rest[j:j+len(hyphenated)].lower() == hyphenated:
+            return (canonical, j + len(hyphenated))
+
+    # 标准标签名匹配
+    name_end = j
+    while name_end < rest_len and (rest[name_end].isalnum() or rest[name_end] == '_'):
+        name_end += 1
+
+    if name_end == j:
+        return None
+
+    tag_name = rest[j:name_end].lower()
+    if tag_name in _MIMOML_TAG_NAMES:
+        return (tag_name, name_end)
+
+    return None
+
+
 def _parse_mimoml_parameters(inner_text: str) -> Dict[str, Any]:
-    """解析 <parameter name="x">...</parameter> 为参数 dict。"""
+    """解析 <parameter name="x">...</parameter> 为参数 dict。
+
+    支持：
+      - CDATA 提取
+      - JSON 字面量自动识别
+      - <item> 子节点 → 数组
+      - 嵌套 XML → 结构化对象
+      - 重复 key → 自动合并为数组
+      - HTML 实体解码（&lt; &gt; &amp; 等）
+    """
     args: Dict[str, Any] = {}
     param_pattern = re.compile(
         r"<parameter\s+name=[\"']([^\"']+)[\"']>(.*?)</parameter>",
@@ -917,12 +975,174 @@ def _parse_mimoml_parameters(inner_text: str) -> Dict[str, Any]:
     for m in param_pattern.finditer(inner_text):
         key = m.group(1).strip()
         val_raw = m.group(2).strip()
-        # 提取 CDATA
-        if val_raw.startswith(_CDATA_OPEN) and val_raw.endswith(_CDATA_CLOSE):
-            val_raw = val_raw[len(_CDATA_OPEN):-len(_CDATA_CLOSE)]
-        try:
-            val = json.loads(val_raw)
-        except (json.JSONDecodeError, ValueError):
-            val = _auto_type(val_raw)
-        args[key] = val
+        val = _parse_param_value(val_raw)
+
+        # 重复 key → 合并为数组
+        if key in args:
+            existing = args[key]
+            if isinstance(existing, list):
+                existing.append(val)
+            else:
+                args[key] = [existing, val]
+        else:
+            args[key] = val
     return args
+
+
+def _parse_param_value(val_raw: str) -> Any:
+    """解析单个 parameter 的值，处理 CDATA / JSON / 结构化 XML / HTML 实体。"""
+    if not val_raw:
+        return ""
+
+    # CDATA 提取
+    if val_raw.startswith(_CDATA_OPEN) and val_raw.endswith(_CDATA_CLOSE):
+        inner = val_raw[len(_CDATA_OPEN):-len(_CDATA_CLOSE)]
+        # 结构化 CDATA 恢复：如果 CDATA 内是完整 XML，尝试解析
+        if inner.strip().startswith("<") and ">" in inner:
+            parsed = _parse_structured_xml(inner)
+            if parsed is not None:
+                return parsed
+        return _html_unescape(inner)
+
+    # 检查是否包含子节点（结构化 XML 参数）
+    if "<" in val_raw and ">" in val_raw:
+        parsed = _parse_structured_xml(val_raw)
+        if parsed is not None and parsed != {}:
+            return parsed
+
+    # JSON 字面量
+    try:
+        return json.loads(val_raw)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # 自动类型推断 + HTML 实体解码
+    result = _auto_type(val_raw)
+    if isinstance(result, str):
+        result = _html_unescape(result)
+    return result
+
+
+def _html_unescape(text: str) -> str:
+    """解码常见 HTML 实体。"""
+    if not isinstance(text, str):
+        return text
+    entities = {
+        "&lt;": "<", "&gt;": ">", "&amp;": "&", "&quot;": '"',
+        "&apos;": "'", "&#39;": "'", "&#x27;": "'",
+    }
+    for entity, char in entities.items():
+        text = text.replace(entity, char)
+    return text
+
+
+def _parse_structured_xml(text: str) -> Optional[Dict[str, Any]]:
+    """将结构化 XML 还原为 dict/array。
+
+    处理：
+      - <item>...</item> × N → [...]（数组）
+      - <key>value</key> × N → {key: value, ...}（对象）
+      - 混合情况保留为字符串
+    """
+    text = text.strip()
+    if not text or text[0] != '<':
+        return None
+
+    # 提取所有顶层子节点
+    items = []
+    pos = 0
+    item_pattern = re.compile(r"<(\w+)(?:\s[^>]*)?>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
+
+    for m in item_pattern.finditer(text):
+        tag = m.group(1).lower()
+        inner = m.group(2).strip()
+        # 跳过 parameter 标签（这是外层不属于结构化内容）
+        if tag == "parameter":
+            continue
+
+        # 递归解析子节点
+        if "<" in inner and ">" in inner:
+            child = _parse_structured_xml(inner)
+            if child is not None:
+                items.append({tag: child} if tag != "item" else child)
+            else:
+                items.append({tag: _html_unescape(inner)} if tag != "item" else _html_unescape(inner))
+        else:
+            val = _parse_param_value(inner)
+            items.append({tag: val} if tag != "item" else val)
+
+    if not items:
+        return None
+
+    # 全是纯值（无 dict key）→ 数组
+    if all(not isinstance(it, dict) for it in items):
+        return items
+
+    # 合并：提取所有 key，同名合并
+    result = {}
+    all_items = True
+    for it in items:
+        if isinstance(it, dict):
+            for k, v in it.items():
+                if k != "item":
+                    all_items = False
+                if k in result:
+                    existing = result[k]
+                    if isinstance(existing, list):
+                        existing.append(v)
+                    else:
+                        result[k] = [existing, v]
+                else:
+                    result[k] = v
+        else:
+            # 纯值：合并到 "item" key
+            if "item" in result:
+                if isinstance(result["item"], list):
+                    result["item"].append(it)
+                else:
+                    result["item"] = [result["item"], it]
+            else:
+                result["item"] = it
+
+    # 如果所有顶层都是 <item> → 返回纯数组
+    if all_items and set(result.keys()) == {"item"}:
+        val = result["item"]
+        return val if isinstance(val, list) else [val]
+
+    return result if result else None
+
+
+def _sanitize_loose_cdata(text: str) -> str:
+    """修复未闭合的 CDATA 段。
+
+    如果 <![CDATA[ 打开但没有 ]]> 闭合，移除开标记，
+    让剩余文本仍能被正常解析。
+    """
+    if not text:
+        return text
+
+    text_lower = text.lower()
+    result_parts = []
+    i = 0
+
+    while i < len(text):
+        start = text_lower.find(_CDATA_OPEN.lower(), i)
+        if start < 0:
+            result_parts.append(text[i:])
+            break
+
+        result_parts.append(text[i:start])
+        content_start = start + len(_CDATA_OPEN)
+
+        # 查找闭合的 ]]>
+        close = text.find(_CDATA_CLOSE, content_start)
+        if close >= 0:
+            # 正常闭合 → 保留完整 CDATA
+            result_parts.append(text[start:close + len(_CDATA_CLOSE)])
+            i = close + len(_CDATA_CLOSE)
+        else:
+            # 未闭合 → 移除开标记，保留内容
+            result_parts.append(text[content_start:])
+            break
+
+    return ''.join(result_parts)
