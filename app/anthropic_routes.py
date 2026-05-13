@@ -208,7 +208,6 @@ async def _anthropic_stream_think_wrapper(
     # 有工具时创建 StreamSieve 实时筛分 TOOL_CALL
     sieve = None
     collected_tool_calls = []
-    content_buffer_events = []  # 缓冲 text 事件，确认无工具调用后再发
     if has_tools:
         from .tool_sieve import StreamSieve
         sieve = StreamSieve(
@@ -245,8 +244,7 @@ async def _anthropic_stream_think_wrapper(
                     clean = _strip_mimo_prefix(clean)
                     clean = clean_tool_text(clean)
                     if clean:
-                        # 缓冲 text，待确认无工具调用后再发
-                        content_buffer_events.extend(_emit_text(clean))
+                        events.extend(_emit_text(clean))
                 elif ev.type == 'tool_calls':
                     collected_tool_calls.extend(ev.data)
         else:
@@ -342,7 +340,7 @@ async def _anthropic_stream_think_wrapper(
         yield _make_cb_stop(st.think_index)
         st.think_active = False
 
-    # --- 刷新 sieve 回收残留的 tool_calls（不立即发 text） ---
+    # --- 刷新 sieve 回收残留 text/tool_calls ---
     if has_tools and sieve:
         for ev in sieve.flush():
             if ev.type == 'text':
@@ -352,7 +350,8 @@ async def _anthropic_stream_think_wrapper(
                 clean = _strip_mimo_prefix(clean)
                 clean = clean_tool_text(clean)
                 if clean:
-                    content_buffer_events.extend(_emit_text(clean))
+                    for s in _emit_text(clean):
+                        yield s
             elif ev.type == 'tool_calls':
                 collected_tool_calls.extend(ev.data)
 
@@ -380,9 +379,7 @@ async def _anthropic_stream_think_wrapper(
             })
             yield _make_cb_stop(idx)
     else:
-        # 无工具调用 → 发送所有缓冲的 text 事件
-        for s in content_buffer_events:
-            yield s
+        # 无工具调用：text 已在流中发出，只需关闭 text block
         if st.text_active:
             yield _make_cb_stop(st.text_index)
             st.text_active = False

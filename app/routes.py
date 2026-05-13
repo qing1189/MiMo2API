@@ -520,7 +520,7 @@ async def _stream_response(
     行为矩阵：
     | 场景              | reasoning  | content             |
     | 无 tools          | 流式       | 流式                |
-    | 有 tools+无工具调用 | 流式      | 缓冲后一次性发送     |
+    | 有 tools+无工具调用 | 流式      | 流式                |
     | 有 tools+有工具调用 | 流式      | 不发（发 tool_calls）|
 
     修复 v4.1：
@@ -548,7 +548,7 @@ async def _stream_response(
                 parse_fn=lambda text: extract_tool_call(text, tool_names),
             )
             collected_tool_calls = []
-            content_buffer_chunks = []  # 缓冲 content，确认无工具调用后再发
+            content_buffer_chunks = []  # 收集 content（工具调用时丢弃）
             in_think = False
             buffer = ""
             last_usage = None
@@ -571,12 +571,13 @@ async def _stream_response(
                         if idx != -1:
                             safe, keep = _safe_flush(buffer[:idx])
                             if safe:
-                                # Feed through sieve — buffer text, collect tool calls
+                                # Feed through sieve — stream text, collect tool calls
                                 for ev in sieve.feed(safe):
                                     if ev.type == 'text':
                                         clean = _clean_response_text(ev.data, tool_names)
                                         if clean:
                                             content_buffer_chunks.append(clean)
+                                            yield _build_chunk(msg_id, model, created=created_t, content=clean)
                                     elif ev.type == 'tool_calls':
                                         collected_tool_calls.extend(ev.data)
                             in_think = True
@@ -590,6 +591,7 @@ async def _stream_response(
                                     clean = _clean_response_text(ev.data, tool_names)
                                     if clean:
                                         content_buffer_chunks.append(clean)
+                                        yield _build_chunk(msg_id, model, created=created_t, content=clean)
                                 elif ev.type == 'tool_calls':
                                     collected_tool_calls.extend(ev.data)
                         buffer = keep
@@ -610,22 +612,24 @@ async def _stream_response(
                         buffer = keep
                         break
 
-            # 正文留在 buffer 中的追加到 sieve（缓冲，不立即发）
+            # 正文留在 buffer 中的追加到 sieve
             if buffer and not in_think:
                 for ev in sieve.feed(buffer):
                     if ev.type == 'text':
                         clean = _clean_response_text(ev.data, tool_names)
                         if clean:
                             content_buffer_chunks.append(clean)
+                            yield _build_chunk(msg_id, model, created=created_t, content=clean)
                     elif ev.type == 'tool_calls':
                         collected_tool_calls.extend(ev.data)
 
-            # 刷新 sieve，回收最终工具调用（缓冲，不立即发）
+            # 刷新 sieve，回收最终残留 text/tool_calls
             for ev in sieve.flush():
                 if ev.type == 'text':
                     clean = _clean_response_text(ev.data, tool_names)
                     if clean:
                         content_buffer_chunks.append(clean)
+                        yield _build_chunk(msg_id, model, created=created_t, content=clean)
                 elif ev.type == 'tool_calls':
                     collected_tool_calls.extend(ev.data)
 
@@ -640,9 +644,7 @@ async def _stream_response(
                     _update_session_tokens(account_id, conv_id, last_usage.get("promptTokens", 0))
                 return
 
-            # 无工具调用：一次性发送所有缓冲的 content
-            for chunk_text in content_buffer_chunks:
-                yield _build_chunk(msg_id, model, created=created_t, content=chunk_text)
+            # 无工具调用：content 已在流中发出，只需发 stop
             yield _build_chunk(msg_id, model, created=created_t, finish_reason="stop")
             yield "data: [DONE]\n\n"
             if last_usage:
