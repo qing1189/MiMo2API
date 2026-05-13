@@ -443,7 +443,7 @@ async def chat_completions(
     if request.stream:
         return StreamingResponse(
             _stream_response(client, query, thinking, effective_model, tools_dict, multi_medias,
-                             conv_id=conv_id, account_id=account.user_id),
+                             conv_id=conv_id, account_id=account.user_id, api_key=api_key),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache, no-transform",
@@ -459,7 +459,11 @@ async def chat_completions(
 
         # 保存用量
         if usage:
-            _add_usage(request.model, usage.get("promptTokens", 0), usage.get("completionTokens", 0))
+            _add_usage(
+                request.model,
+                usage.get("promptTokens", 0), usage.get("completionTokens", 0),
+                account_id=account.user_id, api_key=api_key,
+            )
             _update_session_tokens(account.user_id, conv_id, usage.get("promptTokens", 0))
 
         # 首次消息：记录真实指纹
@@ -513,7 +517,7 @@ async def chat_completions(
 async def _stream_response(
     client: MimoClient, query: str, thinking: bool, model: str,
     tools: list = None, multi_medias: list = None,
-    conv_id: str = None, account_id: str = None,
+    conv_id: str = None, account_id: str = None, api_key: str = None,
 ):
     """流式响应生成器。
 
@@ -640,7 +644,11 @@ async def _stream_response(
                                    tool_calls=streaming_tc, finish_reason="tool_calls")
                 yield "data: [DONE]\n\n"
                 if last_usage:
-                    _add_usage(model, last_usage.get("promptTokens", 0), last_usage.get("completionTokens", 0))
+                    _add_usage(
+                    model,
+                    last_usage.get("promptTokens", 0), last_usage.get("completionTokens", 0),
+                    account_id=account_id, api_key=api_key,
+                )
                     _update_session_tokens(account_id, conv_id, last_usage.get("promptTokens", 0))
                 return
 
@@ -648,7 +656,11 @@ async def _stream_response(
             yield _build_chunk(msg_id, model, created=created_t, finish_reason="stop")
             yield "data: [DONE]\n\n"
             if last_usage:
-                _add_usage(model, last_usage.get("promptTokens", 0), last_usage.get("completionTokens", 0))
+                _add_usage(
+                    model,
+                    last_usage.get("promptTokens", 0), last_usage.get("completionTokens", 0),
+                    account_id=account_id, api_key=api_key,
+                )
                 _update_session_tokens(account_id, conv_id, last_usage.get("promptTokens", 0))
 
         else:
@@ -717,7 +729,11 @@ async def _stream_response(
             yield _build_chunk(msg_id, model, created=created_t, finish_reason="stop")
             yield "data: [DONE]\n\n"
             if last_usage:
-                _add_usage(model, last_usage.get("promptTokens", 0), last_usage.get("completionTokens", 0))
+                _add_usage(
+                    model,
+                    last_usage.get("promptTokens", 0), last_usage.get("completionTokens", 0),
+                    account_id=account_id, api_key=api_key,
+                )
                 _update_session_tokens(account_id, conv_id, last_usage.get("promptTokens", 0))
 
     except httpx.ReadTimeout:
@@ -2231,8 +2247,13 @@ async def create_response(
 
     # 记录用量
     if usage:
-        _add_usage(model_used, usage.get("promptTokens", 0) or usage.get("prompt_tokens", 0),
-                   usage.get("completionTokens", 0) or usage.get("completion_tokens", 0))
+        _add_usage(
+            model_used,
+            usage.get("promptTokens", 0) or usage.get("prompt_tokens", 0),
+            usage.get("completionTokens", 0) or usage.get("completion_tokens", 0),
+            account_id=getattr(account, "user_id", None),
+            api_key=api_key,
+        )
 
     return response_obj
 

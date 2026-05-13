@@ -525,7 +525,11 @@ async def anthropic_messages(
 
         # 保存用量
         if usage:
-            _add_usage(model, usage.get("promptTokens", 0), usage.get("completionTokens", 0))
+            _add_usage(
+                model,
+                usage.get("promptTokens", 0), usage.get("completionTokens", 0),
+                account_id=account.user_id, api_key=auth,
+            )
             _update_session_tokens(account.user_id, conv_id, usage.get("promptTokens", 0))
 
         # 清理模型输出

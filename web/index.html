@@ -322,6 +322,11 @@
                 </div>
 
                 <div id="panel-usage" class="tab-panel">
+                    <div class="btn-group" style="margin-top:0;margin-bottom:12px;flex-wrap:nowrap;flex-direction:row!important">
+                        <button class="period-btn active" data-dim="models"   onclick="switchUsageDim('models')">📊 按模型</button>
+                        <button class="period-btn"        data-dim="accounts" onclick="switchUsageDim('accounts')">👥 按账号</button>
+                        <button class="period-btn"        data-dim="api_keys" onclick="switchUsageDim('api_keys')">🔑 按 API Key</button>
+                    </div>
                     <div id="usageContent"></div>
                     <div class="btn-group" style="margin-top:14px;flex-wrap:nowrap;flex-direction:row!important">
                         <button class="period-btn active" data-p="total" onclick="switchPeriod('total')">全部</button>
@@ -638,39 +643,69 @@ document.addEventListener('DOMContentLoaded',function(){$id('langBtn').textConte
 
         // === 用量统计 ===
         let usagePeriod = 'total';
-        function fmt(n) { return n.toLocaleString(); }
+        let usageDim = 'models';   // 'models' | 'accounts' | 'api_keys'
+        function fmt(n) { return (n||0).toLocaleString(); }
+
+        function _usageDimLabels(dim) {
+            // 返回 {header: 列标题, empty: 空态文案}
+            if (dim === 'accounts') return { header: 'MiMo 账号 (userId)', empty: '暂无账号级用量数据' };
+            if (dim === 'api_keys') return { header: 'API Key',            empty: '暂无按 Key 的用量数据' };
+            return { header: _('usageModel') || '模型',                   empty: _('usageNoData') || '暂无用量数据' };
+        }
+
         async function loadUsage() {
             try {
                 const r = await fetch('/api/usage');
+                if (!r.ok) throw new Error('HTTP ' + r.status);
                 const data = await r.json();
                 const period = data[usagePeriod] || data.total || {};
-                const models = period.models || {};
-                const total = period.total || {};
-                let entries = Object.entries(models).sort((a, b) => b[1].total_tokens - a[1].total_tokens);
+                // 兼容旧格式：period.models 可能是 {name: counts}（v1）或 {items, total}（v2）
+                const bundle = period[usageDim];
+                let items = {}, total = { prompt_tokens:0, completion_tokens:0, total_tokens:0, requests:0 };
+                if (bundle && bundle.items !== undefined) {
+                    items = bundle.items || {};
+                    total = bundle.total || total;
+                } else if (usageDim === 'models' && bundle && typeof bundle === 'object') {
+                    // 旧版格式兜底
+                    items = bundle;
+                    total = period.total || total;
+                }
+
+                const entries = Object.entries(items)
+                    .sort((a, b) => (b[1].total_tokens||0) - (a[1].total_tokens||0));
+                const labels = _usageDimLabels(usageDim);
 
                 if (!entries.length && !total.requests) {
-                    $id('usageContent').innerHTML = '<div class="usage-empty"><div class="icon">📊</div>暂无用量数据</div>';
+                    $id('usageContent').innerHTML = '<div class="usage-empty"><div class="icon">📊</div>' + labels.empty + '</div>';
                     return;
                 }
 
-                let html = '<div class="usage-scroll"><table class="usage-tbl"><thead><tr><th class="model-cell">'+_('usageModel')+'</th><th>'+_('usageReqs')+'</th><th>'+_('usageInput')+'</th><th>'+_('usageOutput')+'</th><th>'+_('usageTotal')+'</th></tr></thead><tbody>';
-                for (const [model, m] of entries) {
-                    html += `<tr>
-                        <td class="model-cell">${model}</td>
-                        <td>${fmt(m.requests)}</td>
-                        <td>${fmt(m.prompt_tokens)}</td>
-                        <td>${fmt(m.completion_tokens)}</td>
-                        <td>${fmt(m.total_tokens)}</td>
-                    </tr>`;
+                const escapeHtml = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+                let html = '<div class="usage-scroll"><table class="usage-tbl"><thead><tr>'
+                    + '<th class="model-cell">' + labels.header + '</th>'
+                    + '<th>' + (_('usageReqs')  || '请求') + '</th>'
+                    + '<th>' + (_('usageInput') || '输入') + '</th>'
+                    + '<th>' + (_('usageOutput')|| '输出') + '</th>'
+                    + '<th>' + (_('usageTotal') || '总计') + '</th>'
+                    + '</tr></thead><tbody>';
+                for (const [name, m] of entries) {
+                    html += '<tr>'
+                        + '<td class="model-cell"><code style="background:var(--bg);padding:1px 6px;border-radius:4px;font-size:11px;color:#7dd3fc;word-break:break-all">' + escapeHtml(name) + '</code></td>'
+                        + '<td>' + fmt(m.requests) + '</td>'
+                        + '<td>' + fmt(m.prompt_tokens) + '</td>'
+                        + '<td>' + fmt(m.completion_tokens) + '</td>'
+                        + '<td>' + fmt(m.total_tokens) + '</td>'
+                        + '</tr>';
                 }
                 if (entries.length) {
-                    html += `<tr class="total-row">
-                        <td class="model-cell">'+_('usageSum')+'</td>
-                        <td>${fmt(total.requests)}</td>
-                        <td>${fmt(total.prompt_tokens)}</td>
-                        <td>${fmt(total.completion_tokens)}</td>
-                        <td>${fmt(total.total_tokens)}</td>
-                    </tr>`;
+                    html += '<tr class="total-row">'
+                        + '<td class="model-cell">' + (_('usageSum') || '📋 合计') + '</td>'
+                        + '<td>' + fmt(total.requests) + '</td>'
+                        + '<td>' + fmt(total.prompt_tokens) + '</td>'
+                        + '<td>' + fmt(total.completion_tokens) + '</td>'
+                        + '<td>' + fmt(total.total_tokens) + '</td>'
+                        + '</tr>';
                 }
                 html += '</tbody></table></div>';
                 $id('usageContent').innerHTML = html;
@@ -682,6 +717,12 @@ document.addEventListener('DOMContentLoaded',function(){$id('langBtn').textConte
             usagePeriod = p;
             document.querySelectorAll('#panel-usage .period-btn[data-p]').forEach(b => b.className = 'period-btn');
             document.querySelector('#panel-usage .period-btn[data-p="'+p+'"]').className = 'period-btn active';
+            loadUsage();
+        }
+        function switchUsageDim(d) {
+            usageDim = d;
+            document.querySelectorAll('#panel-usage .period-btn[data-dim]').forEach(b => b.className = 'period-btn');
+            document.querySelector('#panel-usage .period-btn[data-dim="'+d+'"]').className = 'period-btn active';
             loadUsage();
         }
         async function clearUsage() {
