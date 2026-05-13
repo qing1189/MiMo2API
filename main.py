@@ -11,6 +11,11 @@ from app.routes import router, _do_discover
 from app.config import config_manager
 from app.anthropic_routes import router as anthropic_router
 from app.batch import init_batch_storage as init_anthropic_batches
+from app.web_auth import (
+    router as web_auth_router,
+    WebAuthMiddleware,
+    auth_enabled as _web_auth_enabled,
+)
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -27,6 +32,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Web 管理面板鉴权中间件（仅当设置了 WEB_PASSWORD 时生效）
+app.add_middleware(WebAuthMiddleware)
 
 @app.on_event("startup")
 async def startup_discover_models():
@@ -89,6 +97,7 @@ def _cleanup_old_sessions():
 # 注册路由
 app.include_router(router)
 app.include_router(anthropic_router)
+app.include_router(web_auth_router)
 
 # 初始化 Anthropic batch 存储
 import os
@@ -121,6 +130,7 @@ def main():
 配置信息:
   - API Keys: {len(config_manager.config.api_keys.split(','))} 个
   - Mimo账号: {len(config_manager.config.mimo_accounts)} 个
+  - Web 管理面板密码保护: {'已启用' if _web_auth_enabled() else '未启用 (设置 WEB_PASSWORD 环境变量启用)'}
 
 按 Ctrl+C 停止服务器
 """)

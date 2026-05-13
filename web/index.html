@@ -182,8 +182,9 @@
         <div class="header">
             <h1>MiMo2API</h1>
             <p>小米 MiMo 模型 OpenAI 兼容 API</p>
-            <div style="position:absolute;top:40px;right:20px">
+            <div style="position:absolute;top:40px;right:20px;display:flex;gap:8px">
                 <button onclick="toggleLang()" id="langBtn" style="padding:6px 14px;background:var(--bg-input);color:var(--text-muted);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:13px">🌐 EN</button>
+                <button onclick="doLogout()" id="logoutBtn" style="display:none;padding:6px 14px;background:var(--bg-input);color:var(--text-muted);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:13px">🔒 登出</button>
             </div>
         </div>
 
@@ -274,6 +275,40 @@ document.addEventListener('DOMContentLoaded',function(){$id('langBtn').textConte
 
         // === 工具函数 ===
         function $id(id) { return document.getElementById(id); }
+
+        // 统一 fetch 封装：遇 401 自动跳转登录页
+        const _origFetch = window.fetch.bind(window);
+        window.fetch = async function(input, init) {
+            const resp = await _origFetch(input, init);
+            try {
+                const url = (typeof input === 'string') ? input : (input && input.url) || '';
+                // 只对管理 API 做跳转；避免干扰 /v1/* 等外部 API
+                if (resp.status === 401 && (url.startsWith('/api/') || url.startsWith('api/'))) {
+                    // 排除登录/状态接口自身
+                    if (!url.includes('/api/login') && !url.includes('/api/auth/status')) {
+                        const next = encodeURIComponent(window.location.pathname + window.location.search);
+                        window.location.href = '/login?next=' + next;
+                    }
+                }
+            } catch (e) { /* ignore */ }
+            return resp;
+        };
+
+        async function doLogout() {
+            try { await _origFetch('/api/logout', { method: 'POST' }); } catch (e) {}
+            window.location.href = '/login';
+        }
+
+        async function checkAuthStatus() {
+            try {
+                const r = await _origFetch('/api/auth/status');
+                const d = await r.json();
+                if (d && d.enabled) {
+                    const btn = $id('logoutBtn');
+                    if (btn) btn.style.display = 'inline-block';
+                }
+            } catch (e) { /* ignore */ }
+        }
         function toast(msg, err) {
             const t = $id('toast');
             t.textContent = msg; t.className = 'toast show ' + (err ? 'toast-err' : 'toast-ok');
@@ -582,6 +617,7 @@ document.addEventListener('DOMContentLoaded',function(){$id('langBtn').textConte
 
         // === 初始化 ===
         loadConfig();
+        checkAuthStatus();
     </script>
 </body>
 </html>

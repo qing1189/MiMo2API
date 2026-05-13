@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MiMo2API · 登录</title>
+    <style>
+        :root {
+            --primary: #6366f1;
+            --primary-hover: #4f46e5;
+            --danger: #ef4444;
+            --bg: #0f172a;
+            --bg-card: #1e293b;
+            --bg-input: #334155;
+            --text: #f1f5f9;
+            --text-muted: #94a3b8;
+            --border: #475569;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, var(--bg) 0%, #1a1a2e 100%);
+            min-height: 100vh; color: var(--text); line-height: 1.6;
+            display: flex; align-items: center; justify-content: center; padding: 20px;
+        }
+        .login-card {
+            background: var(--bg-card); border-radius: 16px; padding: 36px 32px;
+            width: 100%; max-width: 380px;
+            box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+        h1 {
+            font-size: 1.8rem; font-weight: 700; text-align: center; margin-bottom: 6px;
+            background: linear-gradient(135deg, #6366f1, #a855f7, #ec4899);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .subtitle { text-align: center; color: var(--text-muted); font-size: 14px; margin-bottom: 28px; }
+        label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
+        input[type="password"] {
+            width: 100%; padding: 12px 14px;
+            background: var(--bg-input); border: 1px solid var(--border);
+            border-radius: 10px; color: var(--text); font-size: 14px;
+            outline: none; transition: border-color 0.2s;
+        }
+        input[type="password"]:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(99,102,241,0.2);
+        }
+        button {
+            width: 100%; padding: 12px; margin-top: 16px;
+            background: linear-gradient(135deg, var(--primary), #8b5cf6);
+            color: white; border: none; border-radius: 10px;
+            font-size: 14px; font-weight: 600; cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        button:hover { opacity: 0.92; }
+        button:disabled { opacity: 0.6; cursor: not-allowed; }
+        .error {
+            margin-top: 14px; padding: 10px 12px;
+            background: rgba(239,68,68,0.12); color: #fca5a5;
+            border: 1px solid rgba(239,68,68,0.3);
+            border-radius: 8px; font-size: 13px;
+            display: none;
+        }
+        .error.show { display: block; }
+        .footer {
+            margin-top: 24px; text-align: center;
+            font-size: 12px; color: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+    <form class="login-card" id="form" onsubmit="return doLogin(event)">
+        <h1>MiMo2API</h1>
+        <div class="subtitle">管理面板 · 请输入密码</div>
+        <label for="pw">密码</label>
+        <input type="password" id="pw" autocomplete="current-password" required autofocus>
+        <button type="submit" id="btn">登 录</button>
+        <div class="error" id="err"></div>
+        <div class="footer">密码在部署时通过 <code>WEB_PASSWORD</code> 环境变量配置</div>
+    </form>
+
+    <script>
+        function getNext() {
+            try {
+                var p = new URLSearchParams(window.location.search);
+                var n = p.get('next') || '/';
+                // 防开放重定向：只允许站内相对路径
+                if (!n.startsWith('/') || n.startsWith('//')) return '/';
+                return n;
+            } catch (e) { return '/'; }
+        }
+        async function doLogin(ev) {
+            ev.preventDefault();
+            var pw = document.getElementById('pw').value;
+            var btn = document.getElementById('btn');
+            var err = document.getElementById('err');
+            err.className = 'error';
+            btn.disabled = true; btn.textContent = '登录中...';
+            try {
+                var r = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: pw })
+                });
+                var d = await r.json().catch(function(){return {}});
+                if (r.ok && d.ok) {
+                    window.location.href = getNext();
+                    return false;
+                }
+                err.textContent = d.error || ('登录失败 (HTTP ' + r.status + ')');
+                err.className = 'error show';
+            } catch (e) {
+                err.textContent = '请求失败: ' + e.message;
+                err.className = 'error show';
+            } finally {
+                btn.disabled = false; btn.textContent = '登 录';
+            }
+            return false;
+        }
+    </script>
+</body>
+</html>
