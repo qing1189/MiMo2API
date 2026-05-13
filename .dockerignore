@@ -8,3 +8,7 @@ usage.json
 responses.json
 sessions.json
 *.log
+data/
+docker-compose.yml
+docker-compose.yaml
+docker-compose.override.yml

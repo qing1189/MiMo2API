@@ -1,0 +1,79 @@
+# MiMo2API · Docker Compose 部署文件
+#
+# 使用步骤：
+#   1. 修改下方 environment.WEB_PASSWORD 为你自己的强密码
+#   2. 构建并启动：
+#        docker compose build          # 基于本地 Dockerfile 构建镜像
+#        docker compose up -d          # 后台启动
+#        docker compose logs -f        # 查看日志
+#        docker compose down           # 停止并移除容器
+#   3. 访问 http://服务器IP:8080 → 用 WEB_PASSWORD 登录
+#      (如未预先放入 data/config.json，首次启动会从 config.example.json 生成)
+#
+# 持久化：所有运行时数据统一放在宿主机 ./data/ 目录下：
+#   data/config.json             账号 / API Key 配置
+#   data/usage.json              用量统计
+#   data/sessions.json           会话缓存
+#   data/responses.json          Responses API 存储
+#   data/anthropic_batches/      Anthropic batches 数据
+# 容器重建不会丢失数据；升级只需 `docker compose build && docker compose up -d`。
+
+services:
+  mimo2api:
+    # 使用本地 Dockerfile 构建镜像；`docker compose build` 会用这里的 context
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mimo2api:local
+    container_name: mimo2api
+    restart: unless-stopped
+
+    ports:
+      # 主机端口:容器端口。改对外端口只改左侧，例如 "9000:8080"
+      - "8080:8080"
+
+    environment:
+      # ─────────────────────────────────────────────
+      # 【必改】Web 管理面板登录密码
+      # 留空 = 不启用密码（仅内网且完全信任环境使用）
+      # ─────────────────────────────────────────────
+      WEB_PASSWORD: "change-me-please"
+
+      # 服务监听端口（容器内），改动时同步修改上方 ports 右侧
+      PORT: "8080"
+
+      # Python 输出不缓冲，便于 docker logs 实时查看
+      PYTHONUNBUFFERED: "1"
+
+    volumes:
+      # 所有运行时数据集中挂到宿主 ./data/ 下
+      - ./data:/data
+
+    # 启动脚本：
+    #   1. 初始化 data/ 目录；config.json 不存在时从 config.example.json 生成
+    #   2. 将运行时文件/目录 symlink 到 /data 下，实现持久化
+    #   3. exec python main.py 启动服务
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        mkdir -p /data /data/anthropic_batches
+        [ -f /data/config.json ] || cp /app/config.example.json /data/config.json
+        [ -f /data/usage.json ]      || echo '{}' > /data/usage.json
+        [ -f /data/sessions.json ]   || echo '{}' > /data/sessions.json
+        [ -f /data/responses.json ]  || echo '{}' > /data/responses.json
+        ln -sfn /data/config.json          /app/config.json
+        ln -sfn /data/usage.json           /app/usage.json
+        ln -sfn /data/sessions.json        /app/sessions.json
+        ln -sfn /data/responses.json       /app/app/responses.json
+        ln -sfn /data/anthropic_batches    /app/.anthropic_batches
+        exec python main.py
+
+    healthcheck:
+      # /login 页面无鉴权，适合做存活检查（有 Web 密码时也返回 200）
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:8080/login', timeout=3)\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
