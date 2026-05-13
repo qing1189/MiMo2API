@@ -933,6 +933,43 @@ async def test_account_endpoint(request: TestAccountRequest):
         return {"success": False, "error": str(e)}
 
 
+# ─── 调度器状态 & 控制 ────────────────────────────────────────
+
+@router.get("/api/scheduler")
+async def scheduler_status():
+    """返回所有账号的调度器实时状态。"""
+    from .account_scheduler import scheduler
+    return scheduler.snapshot(config_manager.config.mimo_accounts)
+
+
+@router.post("/api/scheduler/{user_id}/reset")
+async def scheduler_reset_one(user_id: str):
+    from .account_scheduler import scheduler
+    scheduler.reset(user_id)
+    return {"ok": True}
+
+
+@router.post("/api/scheduler/{user_id}/disable")
+async def scheduler_disable(user_id: str):
+    from .account_scheduler import scheduler
+    scheduler.disable(user_id)
+    return {"ok": True}
+
+
+@router.post("/api/scheduler/{user_id}/enable")
+async def scheduler_enable(user_id: str):
+    from .account_scheduler import scheduler
+    scheduler.enable(user_id)
+    return {"ok": True}
+
+
+@router.post("/api/scheduler/reset-all")
+async def scheduler_reset_all():
+    from .account_scheduler import scheduler
+    scheduler.reset_all()
+    return {"ok": True}
+
+
 # ─── 用量统计 API ─────────────────────────────────────────────
 
 @router.get("/api/usage")

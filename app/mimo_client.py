@@ -8,6 +8,23 @@ from typing import Optional, Tuple, AsyncIterator
 from .config import MimoAccount
 
 
+def _report_success(user_id: str):
+    """上报本次调用成功给调度器（容错：任何异常不应影响业务）"""
+    try:
+        from .account_scheduler import scheduler
+        scheduler.report_success(user_id)
+    except Exception:
+        pass
+
+
+def _report_failure(user_id: str, status: Optional[int] = None, err: str = ""):
+    try:
+        from .account_scheduler import scheduler
+        scheduler.report_failure(user_id, status_code=status, error=err)
+    except Exception:
+        pass
+
+
 class MimoApiError(Exception):
     """MiMo API上游错误，携带HTTP状态码和响应体"""
     def __init__(self, status_code: int, response_body: str):
@@ -78,49 +95,57 @@ class MimoClient:
         """
         body = self._create_request_body(query, thinking, model, multi_medias, attachments, conversation_id)
 
-        async with httpx.AsyncClient(timeout=self.TIMEOUT) as client:
-            response = await client.post(
-                self.API_URL,
-                params={"xiaomichatbot_ph": self.account.xiaomichatbot_ph},
-                headers=self._create_headers(),
-                cookies=self._create_cookies(),
-                json=body
-            )
+        try:
+            async with httpx.AsyncClient(timeout=self.TIMEOUT) as client:
+                response = await client.post(
+                    self.API_URL,
+                    params={"xiaomichatbot_ph": self.account.xiaomichatbot_ph},
+                    headers=self._create_headers(),
+                    cookies=self._create_cookies(),
+                    json=body
+                )
 
-            if response.status_code != 200:
-                raise MimoApiError(response.status_code, response.text)
+                if response.status_code != 200:
+                    _report_failure(self.account.user_id, response.status_code, response.text[:200])
+                    raise MimoApiError(response.status_code, response.text)
 
-            result = []
-            usage = {"promptTokens": 0, "completionTokens": 0}
+                result = []
+                usage = {"promptTokens": 0, "completionTokens": 0}
 
-            # 解析SSE流
-            async for line in response.aiter_lines():
-                if line.startswith("data:"):
-                    data = line[5:].strip()
-                    try:
-                        sse_data = json.loads(data)
-                        if isinstance(sse_data, dict):
-                            if sse_data.get("type") == "text":
-                                content = sse_data.get("content", "")
-                                # 过滤 MiMo 原生前缀
-                                if content.strip() not in self._MIMO_SSE_PREFIXES:
-                                    result.append(content)
-                            if "promptTokens" in sse_data:
-                                usage = {
-                                    "promptTokens": sse_data.get("promptTokens", 0),
-                                    "completionTokens": sse_data.get("completionTokens", 0)
-                                }
-                        # list 类型跳过
-                        elif isinstance(sse_data, list):
+                # 解析SSE流
+                async for line in response.aiter_lines():
+                    if line.startswith("data:"):
+                        data = line[5:].strip()
+                        try:
+                            sse_data = json.loads(data)
+                            if isinstance(sse_data, dict):
+                                if sse_data.get("type") == "text":
+                                    content = sse_data.get("content", "")
+                                    # 过滤 MiMo 原生前缀
+                                    if content.strip() not in self._MIMO_SSE_PREFIXES:
+                                        result.append(content)
+                                if "promptTokens" in sse_data:
+                                    usage = {
+                                        "promptTokens": sse_data.get("promptTokens", 0),
+                                        "completionTokens": sse_data.get("completionTokens", 0)
+                                    }
+                            # list 类型跳过
+                            elif isinstance(sse_data, list):
+                                continue
+                        except json.JSONDecodeError:
                             continue
-                    except json.JSONDecodeError:
-                        continue
 
-            # 合并结果并解析think标签
-            full_text = "".join(result).replace("\x00", "")
-            content, think_content = self._parse_think_tags(full_text)
+                # 合并结果并解析think标签
+                full_text = "".join(result).replace("\x00", "")
+                content, think_content = self._parse_think_tags(full_text)
 
-            return content, think_content, usage
+                _report_success(self.account.user_id)
+                return content, think_content, usage
+        except MimoApiError:
+            raise
+        except Exception as e:
+            _report_failure(self.account.user_id, None, str(e)[:200])
+            raise
 
     async def stream_api(self, query: str, thinking: bool = False, model: str = "mimo-v2-pro", multi_medias: list = None, attachments: list = None, conversation_id: str = None) -> AsyncIterator[dict]:
         """
@@ -132,56 +157,79 @@ class MimoClient:
         body = self._create_request_body(query, thinking, model, multi_medias, attachments, conversation_id)
 
         chunk_count = 0
+        reported = False  # 确保成功/失败只上报一次
+        yielded_any = False
 
-        async with httpx.AsyncClient(timeout=self.TIMEOUT) as client:
-            async with client.stream(
-                "POST",
-                self.API_URL,
-                params={"xiaomichatbot_ph": self.account.xiaomichatbot_ph},
-                headers=self._create_headers(),
-                cookies=self._create_cookies(),
-                json=body
-            ) as response:
-                if response.status_code != 200:
-                    error_body = await response.aread()
-                    raise MimoApiError(response.status_code, error_body.decode(errors="replace"))
+        try:
+            async with httpx.AsyncClient(timeout=self.TIMEOUT) as client:
+                async with client.stream(
+                    "POST",
+                    self.API_URL,
+                    params={"xiaomichatbot_ph": self.account.xiaomichatbot_ph},
+                    headers=self._create_headers(),
+                    cookies=self._create_cookies(),
+                    json=body
+                ) as response:
+                    if response.status_code != 200:
+                        error_body = await response.aread()
+                        _report_failure(self.account.user_id, response.status_code,
+                                        error_body.decode(errors="replace")[:200])
+                        reported = True
+                        raise MimoApiError(response.status_code, error_body.decode(errors="replace"))
 
-                async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    chunk_count += 1
-                    try:
-                        sse_data = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        chunk_count += 1
+                        try:
+                            sse_data = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
 
-                    # 安全的类型分发
-                    if isinstance(sse_data, list):
-                        continue
-                    if not isinstance(sse_data, dict):
-                        continue
+                        # 安全的类型分发
+                        if isinstance(sse_data, list):
+                            continue
+                        if not isinstance(sse_data, dict):
+                            continue
 
-                    # DEBUG 日志（已关闭）
-                    # try:
-                    #     with open('/data/data/com.termux/files/home/MiMo2API/debug_api.log', 'a') as _df:
-                    #         _df.write(f"[SSE #{chunk_count}] type={sse_data.get('type','?')} content={repr(sse_data.get('content',''))[:200]} keys={list(sse_data.keys())}\n")
-                    # except Exception:
-                    #     pass
+                        # DEBUG 日志（已关闭）
+                        # try:
+                        #     with open('/data/data/com.termux/files/home/MiMo2API/debug_api.log', 'a') as _df:
+                        #         _df.write(f"[SSE #{chunk_count}] type={sse_data.get('type','?')} content={repr(sse_data.get('content',''))[:200]} keys={list(sse_data.keys())}\n")
+                        # except Exception:
+                        #     pass
 
-                    # 过滤 MiMo 原生 SSE 前缀事件（如 SSE #2 的 'webSearch'）
-                    if sse_data.get("type") == "text" and sse_data.get("content"):
-                        content_val = sse_data["content"].strip()
-                        if content_val in self._MIMO_SSE_PREFIXES:
-                            continue  # 跳过 MiMo 原生的工具名 SSE 事件
+                        # 过滤 MiMo 原生 SSE 前缀事件（如 SSE #2 的 'webSearch'）
+                        if sse_data.get("type") == "text" and sse_data.get("content"):
+                            content_val = sse_data["content"].strip()
+                            if content_val in self._MIMO_SSE_PREFIXES:
+                                continue  # 跳过 MiMo 原生的工具名 SSE 事件
 
-                    # 只 yield text 类型和 usage 事件
-                    if sse_data.get("type") == "text" and sse_data.get("content"):
-                        yield sse_data
-                    elif "promptTokens" in sse_data:
-                        yield {"type": "usage", "promptTokens": sse_data.get("promptTokens", 0),
-                               "completionTokens": sse_data.get("completionTokens", 0),
-                               "totalTokens": sse_data.get("totalTokens", 0)}
+                        # 只 yield text 类型和 usage 事件
+                        if sse_data.get("type") == "text" and sse_data.get("content"):
+                            yielded_any = True
+                            yield sse_data
+                        elif "promptTokens" in sse_data:
+                            yielded_any = True
+                            yield {"type": "usage", "promptTokens": sse_data.get("promptTokens", 0),
+                                   "completionTokens": sse_data.get("completionTokens", 0),
+                                   "totalTokens": sse_data.get("totalTokens", 0)}
+
+            # 流正常结束：有内容即视为成功
+            if not reported:
+                if yielded_any:
+                    _report_success(self.account.user_id)
+                else:
+                    # 空响应也视为可疑失败（上游异常）
+                    _report_failure(self.account.user_id, None, "empty stream response")
+                reported = True
+        except MimoApiError:
+            raise
+        except Exception as e:
+            if not reported:
+                _report_failure(self.account.user_id, None, str(e)[:200])
+            raise
 
     @staticmethod
     def _parse_think_tags(text: str) -> Tuple[str, str]:

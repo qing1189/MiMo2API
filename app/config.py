@@ -107,10 +107,22 @@ class ConfigManager:
             return key in keys
 
     def get_next_account(self) -> Optional[MimoAccount]:
-        """获取下一个账号（轮询）"""
+        """获取下一个账号。
+
+        优先走智能调度器（加权随机、失败降权、冷却/恢复），
+        若调度器不可用则退回简单轮询。
+        """
         with self.lock:
             if not self.config.mimo_accounts:
                 return None
+            try:
+                from .account_scheduler import scheduler
+                picked = scheduler.pick(self.config.mimo_accounts)
+                if picked is not None:
+                    return picked
+            except Exception as e:
+                print(f"[Scheduler] pick fallback to round-robin: {e}")
+            # 兜底：简单轮询
             account = self.config.mimo_accounts[self.account_idx % len(self.config.mimo_accounts)]
             self.account_idx += 1
             return account
